@@ -82,6 +82,8 @@ export INCLUDE      :=  $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS     :=  $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
+export NROFLAGS     :=  --icon=$(CURDIR)/$(APP_ICON) --nacp=$(CURDIR)/$(TARGET).nacp
+
 .PHONY: $(BUILD) clean all
 
 #---------------------------------------------------------------------------------

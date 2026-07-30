@@ -1,5 +1,6 @@
 // switchmio - Native Stremio catalog browser for Nintendo Switch
-// Poster grid UI, Movies/TV tabs, details screen.
+// Poster grid UI, Movies/TV tabs, details screen, smooth animation,
+// Switch neon red/blue theme, synthesized UI sound effects.
 // DEBUG BUILD: logs every init step to sdmc:/switch/switchmio/log.txt
 
 #include <switch.h>
@@ -7,11 +8,13 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
+#include <SDL2/SDL_mixer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <math.h>
 
 #define MOVIE_URL_FMT  "https://v3-cinemeta.strem.io/catalog/movie/top/skip=%d.json"
 #define SERIES_URL_FMT "https://v3-cinemeta.strem.io/catalog/series/top/skip=%d.json"
@@ -43,6 +46,14 @@ static const char *TAB_NAMES[TAB_COUNT] = { "All", "Movies", "TV Series" };
 #define STATE_GRID     0
 #define STATE_DETAILS  1
 
+// audio
+#define AUDIO_FREQ      48000
+#define SFX_MOVE   0
+#define SFX_SELECT 1
+#define SFX_BACK   2
+#define SFX_TAB    3
+#define SFX_COUNT  4
+
 typedef struct {
     char id[128];
     char name[256];
@@ -55,11 +66,22 @@ static CatalogItem g_items[MAX_ITEMS];
 static int g_item_count = 0;
 
 static SDL_Texture *g_poster_tex[MAX_ITEMS];
-static int g_poster_state[MAX_ITEMS]; // 0 = not tried, 1 = failed, 2 = loaded
+static int g_poster_state[MAX_ITEMS];      // 0 = not tried, 1 = failed, 2 = loaded
+static int g_poster_load_frame[MAX_ITEMS]; // frame number when it finished loading, for fade-in
 
 // indices into g_items matching the current tab filter, rebuilt when tab changes
 static int g_filtered[MAX_ITEMS];
 static int g_filtered_count = 0;
+
+static int g_frame = 0; // global frame counter, used for poster fade-in timing
+
+// synthesized sound effects
+typedef struct {
+    Uint8 *buf;
+    Mix_Chunk *chunk;
+} SoundFX;
+static SoundFX g_sfx[SFX_COUNT];
+static int g_audio_ok = 0;
 
 typedef struct {
     char *data;
@@ -79,6 +101,51 @@ static void logmsg(const char *fmt, ...) {
     fflush(g_log);
 }
 // -------------------------------------------
+
+// ---------- synthesized sound effects (original tones, no external audio files) ----------
+// Generates a short mono-tone-in-stereo chirp sweeping from f0 to f1 over dur_sec,
+// with a linear fade-out to avoid clicks, at the given AUDIO_FREQ/stereo/S16 format.
+static void make_tone(SoundFX *out, double f0, double f1, double dur_sec, double volume) {
+    int n = (int)(dur_sec * AUDIO_FREQ);
+    if (n < 1) n = 1;
+    size_t bytes = (size_t)n * 2 /*channels*/ * sizeof(Sint16);
+    Sint16 *buf = (Sint16 *)malloc(bytes);
+
+    for (int i = 0; i < n; i++) {
+        double t = (double)i / n;
+        double freq = f0 + (f1 - f0) * t;
+        double phase = 2.0 * M_PI * freq * ((double)i / AUDIO_FREQ);
+        double env = 1.0;
+        if (t > 0.75) env = (1.0 - t) / 0.25; // fade out over last 25%
+        Sint16 sample = (Sint16)(sin(phase) * volume * 30000.0 * env);
+        buf[i * 2 + 0] = sample;
+        buf[i * 2 + 1] = sample;
+    }
+
+    out->buf = (Uint8 *)buf;
+    out->chunk = Mix_QuickLoad_RAW(out->buf, (Uint32)bytes);
+}
+
+static void init_sfx(void) {
+    make_tone(&g_sfx[SFX_MOVE],   700,  850, 0.05, 0.35); // short blip, cursor move
+    make_tone(&g_sfx[SFX_SELECT], 550, 1100, 0.14, 0.45); // rising chirp, confirm/select
+    make_tone(&g_sfx[SFX_BACK],   750,  400, 0.14, 0.40); // falling chirp, back/cancel
+    make_tone(&g_sfx[SFX_TAB],    800,  950, 0.07, 0.35); // quick blip, tab/menu switch
+}
+
+static void free_sfx(void) {
+    for (int i = 0; i < SFX_COUNT; i++) {
+        if (g_sfx[i].chunk) Mix_FreeChunk(g_sfx[i].chunk);
+        if (g_sfx[i].buf) free(g_sfx[i].buf);
+    }
+}
+
+static void play_sfx(int idx) {
+    if (!g_audio_ok) return;
+    if (idx < 0 || idx >= SFX_COUNT || !g_sfx[idx].chunk) return;
+    Mix_PlayChannel(-1, g_sfx[idx].chunk, 0);
+}
+// -------------------------------------------------------------------------------------------
 
 static size_t write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
@@ -287,7 +354,9 @@ static void load_poster(SDL_Renderer *ren, int idx) {
         return;
     }
 
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
     g_poster_tex[idx] = tex;
+    g_poster_load_frame[idx] = g_frame;
     g_poster_state[idx] = 2;
 }
 
@@ -363,6 +432,18 @@ static int draw_text_wrapped(SDL_Renderer *ren, TTF_Font *font, const char *text
     return lines_drawn;
 }
 
+// Draws a poster tile with a fade-in alpha ramp based on how long ago it loaded.
+static void draw_poster_tile(SDL_Renderer *ren, int abs_i, SDL_Rect *rect) {
+    if (g_poster_state[abs_i] == 2 && g_poster_tex[abs_i]) {
+        int age = g_frame - g_poster_load_frame[abs_i];
+        int alpha = age * 22;
+        if (alpha > 255) alpha = 255;
+        if (alpha < 0) alpha = 0;
+        SDL_SetTextureAlphaMod(g_poster_tex[abs_i], (Uint8)alpha);
+        SDL_RenderCopy(ren, g_poster_tex[abs_i], NULL, rect);
+    }
+}
+
 int main(int argc, char *argv[]) {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/switchmio", 0777);
@@ -386,7 +467,7 @@ int main(int argc, char *argv[]) {
     }
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_AUDIO) != 0) {
         logmsg("SDL_Init FAILED: %s", SDL_GetError());
         curl_global_cleanup();
         socketExit();
@@ -415,6 +496,16 @@ int main(int argc, char *argv[]) {
         logmsg("IMG_Init ok");
     }
 
+    if (Mix_OpenAudio(AUDIO_FREQ, AUDIO_S16SYS, 2, 1024) != 0) {
+        logmsg("Mix_OpenAudio FAILED: %s (sound effects disabled, app continues)", Mix_GetError());
+        g_audio_ok = 0;
+    } else {
+        Mix_AllocateChannels(8);
+        init_sfx();
+        g_audio_ok = 1;
+        logmsg("Mix_OpenAudio ok, sound effects ready");
+    }
+
     SDL_Window *win = SDL_CreateWindow("switchmio", 0, 0, SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
     if (!win) logmsg("SDL_CreateWindow FAILED: %s", SDL_GetError());
     else logmsg("SDL_CreateWindow ok");
@@ -441,14 +532,18 @@ int main(int argc, char *argv[]) {
         font_small = TTF_OpenFont("sdmc:/switch/switchmio/font.ttf", FONT_SIZE_SMALL);
     }
 
+    // --- Switch neon color theme ---
     SDL_Color white     = {255, 255, 255, 255};
     SDL_Color gray      = {160, 160, 160, 255};
-    SDL_Color dim_gray  = {70, 70, 78, 255};
-    SDL_Color highlight = {40, 120, 220, 255};
+    SDL_Color dim_gray  = {45, 45, 52, 255};
+    SDL_Color neon_blue = {10, 185, 230, 255};  // Joy-Con neon blue accent
+    SDL_Color neon_red  = {255, 60, 45, 255};   // Joy-Con neon red accent
     SDL_Color tab_off   = {90, 90, 100, 255};
+    SDL_Color bg_color  = {18, 18, 24, 255};
 
     if (!win || !ren) {
         logmsg("Aborting: window/renderer not available.");
+        if (g_audio_ok) { free_sfx(); Mix_CloseAudio(); }
         if (font) TTF_CloseFont(font);
         if (font_small) TTF_CloseFont(font_small);
         TTF_Quit();
@@ -463,12 +558,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    SDL_SetRenderDrawColor(ren, 15, 15, 20, 255);
+    SDL_SetRenderDrawColor(ren, bg_color.r, bg_color.g, bg_color.b, 255);
     SDL_RenderClear(ren);
     if (font) {
         draw_text(ren, font, "switchmio - loading movies + series from Cinemeta...", 40, 40, white);
     } else {
-        SDL_SetRenderDrawColor(ren, 220, 120, 20, 255);
+        SDL_SetRenderDrawColor(ren, neon_red.r, neon_red.g, neon_red.b, 255);
         SDL_Rect bar = {40, 40, 600, 40};
         SDL_RenderFillRect(ren, &bar);
     }
@@ -488,12 +583,16 @@ int main(int argc, char *argv[]) {
     int show_account_popup = 0;
     int app_state = STATE_GRID;
     int details_idx = -1;    // absolute index into g_items when in details view
-    int frame = 0;
 
     int margin_x = (SCREEN_W - (GRID_COLS * TILE_W + (GRID_COLS - 1) * GAP_X)) / 2;
     int row_stride = TILE_H + LABEL_H + GAP_Y;
     int rows_visible = (SCREEN_H - GRID_TOP - FOOTER_H) / row_stride;
     if (rows_visible < 1) rows_visible = 1;
+
+    // smooth-animated highlight box position (lerps toward the cursor's target cell)
+    float anim_x = (float)margin_x;
+    float anim_y = (float)GRID_TOP;
+    int anim_inited = 0;
 
     while (running && appletMainLoop()) {
         padUpdate(&pad);
@@ -502,27 +601,39 @@ int main(int argc, char *argv[]) {
         if (kDown & HidNpadButton_Plus) running = 0;
 
         if (show_account_popup) {
-            if (kDown & (HidNpadButton_B | HidNpadButton_Y)) show_account_popup = 0;
+            if (kDown & (HidNpadButton_B | HidNpadButton_Y)) {
+                show_account_popup = 0;
+                play_sfx(SFX_BACK);
+            }
         } else if (app_state == STATE_DETAILS) {
-            if (kDown & HidNpadButton_B) app_state = STATE_GRID;
+            if (kDown & HidNpadButton_B) {
+                app_state = STATE_GRID;
+                play_sfx(SFX_BACK);
+            }
         } else { // STATE_GRID
-            if (kDown & HidNpadButton_Y) show_account_popup = 1;
+            if (kDown & HidNpadButton_Y) {
+                show_account_popup = 1;
+                play_sfx(SFX_TAB);
+            }
 
             if (kDown & HidNpadButton_R) {
                 tab = (tab + 1) % TAB_COUNT;
                 rebuild_filtered(tab);
                 cursor = 0;
                 scroll_row = 0;
+                play_sfx(SFX_TAB);
             }
             if (kDown & HidNpadButton_L) {
                 tab = (tab - 1 + TAB_COUNT) % TAB_COUNT;
                 rebuild_filtered(tab);
                 cursor = 0;
                 scroll_row = 0;
+                play_sfx(SFX_TAB);
             }
 
             if (g_filtered_count > 0) {
                 int total_rows = (g_filtered_count + GRID_COLS - 1) / GRID_COLS;
+                int old_cursor = cursor;
 
                 if (kDown & HidNpadButton_Down) {
                     if (cursor + GRID_COLS < g_filtered_count) cursor += GRID_COLS;
@@ -536,9 +647,12 @@ int main(int argc, char *argv[]) {
                 if (kDown & HidNpadButton_Left) {
                     if ((cursor % GRID_COLS) != 0 && cursor > 0) cursor--;
                 }
+                if (cursor != old_cursor) play_sfx(SFX_MOVE);
+
                 if (kDown & HidNpadButton_A) {
                     details_idx = g_filtered[cursor];
                     app_state = STATE_DETAILS;
+                    play_sfx(SFX_SELECT);
                 }
 
                 int cursor_row = cursor / GRID_COLS;
@@ -569,7 +683,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        SDL_SetRenderDrawColor(ren, 15, 15, 20, 255);
+        SDL_SetRenderDrawColor(ren, bg_color.r, bg_color.g, bg_color.b, 255);
         SDL_RenderClear(ren);
 
         if (app_state == STATE_DETAILS && details_idx >= 0) {
@@ -579,11 +693,14 @@ int main(int argc, char *argv[]) {
             int px = margin_x, py = 90;
             SDL_Rect prect = { px, py, pw, ph };
             if (g_poster_state[details_idx] == 2 && g_poster_tex[details_idx]) {
+                SDL_SetTextureAlphaMod(g_poster_tex[details_idx], 255);
                 SDL_RenderCopy(ren, g_poster_tex[details_idx], NULL, &prect);
             } else {
                 SDL_SetRenderDrawColor(ren, dim_gray.r, dim_gray.g, dim_gray.b, 255);
                 SDL_RenderFillRect(ren, &prect);
             }
+            SDL_SetRenderDrawColor(ren, neon_blue.r, neon_blue.g, neon_blue.b, 255);
+            SDL_RenderDrawRect(ren, &prect);
 
             int text_x = px + pw + 50;
             int text_w = SCREEN_W - text_x - margin_x;
@@ -592,7 +709,7 @@ int main(int argc, char *argv[]) {
                 draw_text(ren, font, it->name, text_x, py, white);
                 char sub[64];
                 snprintf(sub, sizeof(sub), "%s", strcmp(it->type, "movie") == 0 ? "Movie" : "TV Series");
-                draw_text(ren, font, sub, text_x, py + 40, gray);
+                draw_text(ren, font, sub, text_x, py + 40, neon_blue);
             }
             if (font_small) {
                 const char *desc = it->description[0] ? it->description : "No description available.";
@@ -600,9 +717,9 @@ int main(int argc, char *argv[]) {
             }
 
             // Play button placeholder - wired up once Real-Debrid streams are in
-            int bw = 220, bh = 56;
+            int bw = 260, bh = 56;
             int bx = text_x, by = py + ph - bh;
-            SDL_SetRenderDrawColor(ren, highlight.r, highlight.g, highlight.b, 255);
+            SDL_SetRenderDrawColor(ren, neon_red.r, neon_red.g, neon_red.b, 255);
             SDL_Rect btn = { bx, by, bw, bh };
             SDL_RenderFillRect(ren, &btn);
             if (font) draw_text(ren, font, "A: Play (needs Real-Debrid)", bx + 14, by + 14, white);
@@ -616,20 +733,18 @@ int main(int argc, char *argv[]) {
         } else {
             // top bar: title + tabs + account
             if (font) {
-                char header[64];
-                snprintf(header, sizeof(header), "switchmio");
-                draw_text(ren, font, header, margin_x, 20, white);
+                draw_text(ren, font, "switchmio", margin_x, 20, white);
 
                 int tab_x = margin_x + 180;
                 for (int t = 0; t < TAB_COUNT; t++) {
-                    SDL_Color c = (t == tab) ? highlight : tab_off;
+                    SDL_Color c = (t == tab) ? neon_blue : tab_off;
                     draw_text(ren, font, TAB_NAMES[t], tab_x, 20, c);
                     int tw = 0, th = 0;
                     TTF_SizeUTF8(font, TAB_NAMES[t], &tw, &th);
                     tab_x += tw + 30;
                 }
 
-                draw_text(ren, font, "Account: Not signed in", SCREEN_W - margin_x - 260, 20, gray);
+                draw_text(ren, font, "Account: Not signed in", SCREEN_W - margin_x - 260, 20, neon_red);
             }
             if (font_small) {
                 char count_line[64];
@@ -639,10 +754,28 @@ int main(int argc, char *argv[]) {
 
             if (g_filtered_count == 0) {
                 if (font) draw_text(ren, font, "No titles in this tab.", margin_x, 130, white);
+                anim_inited = 0;
             } else {
                 int start_local = scroll_row * GRID_COLS;
                 int end_local = start_local + rows_visible * GRID_COLS;
                 if (end_local > g_filtered_count) end_local = g_filtered_count;
+
+                // compute target pixel position of the cursor's tile for the
+                // smooth-sliding highlight animation
+                int cur_local = cursor - start_local;
+                int cur_col = cur_local % GRID_COLS;
+                int cur_row = cur_local / GRID_COLS;
+                float target_x = (float)(margin_x + cur_col * (TILE_W + GAP_X));
+                float target_y = (float)(GRID_TOP + cur_row * row_stride);
+
+                if (!anim_inited) {
+                    anim_x = target_x;
+                    anim_y = target_y;
+                    anim_inited = 1;
+                } else {
+                    anim_x += (target_x - anim_x) * 0.35f;
+                    anim_y += (target_y - anim_y) * 0.35f;
+                }
 
                 for (int li = start_local; li < end_local; li++) {
                     int abs_i = g_filtered[li];
@@ -656,7 +789,7 @@ int main(int argc, char *argv[]) {
                     SDL_Rect poster_rect = { x, y, TILE_W, TILE_H };
 
                     if (g_poster_state[abs_i] == 2 && g_poster_tex[abs_i]) {
-                        SDL_RenderCopy(ren, g_poster_tex[abs_i], NULL, &poster_rect);
+                        draw_poster_tile(ren, abs_i, &poster_rect);
                     } else {
                         SDL_SetRenderDrawColor(ren, dim_gray.r, dim_gray.g, dim_gray.b, 255);
                         SDL_RenderFillRect(ren, &poster_rect);
@@ -665,19 +798,21 @@ int main(int argc, char *argv[]) {
                         }
                     }
 
-                    if (li == cursor) {
-                        SDL_SetRenderDrawColor(ren, highlight.r, highlight.g, highlight.b, 255);
-                        SDL_Rect border = { x - 4, y - 4, TILE_W + 8, TILE_H + 8 };
-                        for (int b = 0; b < 3; b++) {
-                            SDL_Rect ring = { border.x - b, border.y - b, border.w + b * 2, border.h + b * 2 };
-                            SDL_RenderDrawRect(ren, &ring);
-                        }
-                    }
-
                     if (font) {
                         SDL_Color label_color = (li == cursor) ? white : gray;
                         draw_text_clipped(ren, font, g_items[abs_i].name, x, y + TILE_H + 4, TILE_W, label_color);
                     }
+                }
+
+                // draw the smoothly-animated highlight ring, Joy-Con style:
+                // alternating red/blue rings instead of one flat color
+                int hx = (int)(anim_x + 0.5f);
+                int hy = (int)(anim_y + 0.5f);
+                SDL_Color ring_colors[3] = { neon_blue, neon_red, neon_blue };
+                for (int b = 0; b < 3; b++) {
+                    SDL_Rect ring = { hx - 4 - b, hy - 4 - b, TILE_W + 8 + b * 2, TILE_H + 8 + b * 2 };
+                    SDL_SetRenderDrawColor(ren, ring_colors[b].r, ring_colors[b].g, ring_colors[b].b, 255);
+                    SDL_RenderDrawRect(ren, &ring);
                 }
             }
 
@@ -695,7 +830,7 @@ int main(int argc, char *argv[]) {
             SDL_SetRenderDrawColor(ren, 30, 30, 40, 255);
             SDL_Rect box = { px, py, pw, ph };
             SDL_RenderFillRect(ren, &box);
-            SDL_SetRenderDrawColor(ren, highlight.r, highlight.g, highlight.b, 255);
+            SDL_SetRenderDrawColor(ren, neon_blue.r, neon_blue.g, neon_blue.b, 255);
             SDL_RenderDrawRect(ren, &box);
             draw_text(ren, font, "Real-Debrid login", px + 24, py + 24, white);
             draw_text(ren, font, "Device-code sign-in coming in the next update.", px + 24, py + 64, gray);
@@ -704,18 +839,19 @@ int main(int argc, char *argv[]) {
 
         SDL_RenderPresent(ren);
 
-        frame++;
-        if (frame == 1 || frame == 60 || frame == 300) {
-            logmsg("frame %d presented", frame);
+        g_frame++;
+        if (g_frame == 1 || g_frame == 60 || g_frame == 300) {
+            logmsg("frame %d presented", g_frame);
         }
     }
 
-    logmsg("Exiting main loop, total frames=%d", frame);
+    logmsg("Exiting main loop, total frames=%d", g_frame);
 
     for (int i = 0; i < g_item_count; i++) {
         if (g_poster_tex[i]) SDL_DestroyTexture(g_poster_tex[i]);
     }
 
+    if (g_audio_ok) { free_sfx(); Mix_CloseAudio(); }
     if (font) TTF_CloseFont(font);
     if (font_small) TTF_CloseFont(font_small);
     TTF_Quit();

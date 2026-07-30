@@ -53,8 +53,7 @@ CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++20
 ASFLAGS :=  -g $(ARCH)
 LDFLAGS  =  -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    :=  -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lnx#---------------------------------------------------------------------------------
-LIBDIRS :=  $(PORTLIBS) $(LIBNX)
+LIBS    :=  -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lnxLIBDIRS :=  $(PORTLIBS) $(LIBNX)
 
 #---------------------------------------------------------------------------------
 # Use the cross-compiler as the linker driver, not the plain system 'ld'

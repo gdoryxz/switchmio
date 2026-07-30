@@ -1,8 +1,10 @@
 name: Build switchmio NRO
+
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -10,10 +12,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Install portlibs (curl, mbedtls, zlib, SDL2)
-        run: dkp-pacman -S switch-curl switch-mbedtls switch-zlib switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-freetype --noconfirm --needed
+
       - name: Build .nro
         run: make
+
       - name: Upload built NRO
         uses: actions/upload-artifact@v4
         with:

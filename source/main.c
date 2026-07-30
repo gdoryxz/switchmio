@@ -1,10 +1,7 @@
 // switchmio - Native Stremio catalog browser for Nintendo Switch
-// Fetches the FULL "Top Movies" and "Top Series" catalogs from Stremio's
-// official Cinemeta addon (paginated), then shows them in a real graphical
-// SDL2 list UI with a highlight box, scrollable with the D-pad.
-//
-// Fetch logic is unchanged from the console version - only the display
-// layer is new.
+// DEBUG BUILD: logs every init step to sdmc:/switch/switchmio/log.txt
+// so we can see exactly where SDL/TTF/font setup is failing (SDL owns
+// the whole screen once it starts, so printf output is no longer visible).
 
 #include <switch.h>
 #include <curl/curl.h>
@@ -13,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #define MOVIE_URL_FMT  "https://v3-cinemeta.strem.io/catalog/movie/top/skip=%d.json"
 #define SERIES_URL_FMT "https://v3-cinemeta.strem.io/catalog/series/top/skip=%d.json"
@@ -36,6 +34,20 @@ typedef struct {
     char *data;
     size_t size;
 } MemBuf;
+
+// ---------- debug log to SD card ----------
+static FILE *g_log = NULL;
+
+static void logmsg(const char *fmt, ...) {
+    if (!g_log) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_log, fmt, ap);
+    va_end(ap);
+    fprintf(g_log, "\n");
+    fflush(g_log);
+}
+// -------------------------------------------
 
 static size_t write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
@@ -130,9 +142,14 @@ static void fetch_full_catalog(const char *url_fmt, const char *type_label) {
 
         MemBuf chunk;
         CURLcode res = fetch_url(url, &chunk);
-        if (res != CURLE_OK) { free(chunk.data); break; }
+        if (res != CURLE_OK) {
+            logmsg("fetch_url failed for %s : curl code %d", url, res);
+            free(chunk.data);
+            break;
+        }
 
         int added = extract_items(chunk.data, type_label);
+        logmsg("fetched %s skip=%d -> +%d items (total=%d)", type_label, skip, added, g_item_count);
         free(chunk.data);
 
         if (added == 0) break;
@@ -141,7 +158,6 @@ static void fetch_full_catalog(const char *url_fmt, const char *type_label) {
     }
 }
 
-// Renders `text` at (x,y) in the given color, returns nothing - just blits.
 static void draw_text(SDL_Renderer *ren, TTF_Font *font, const char *text, int x, int y, SDL_Color color) {
     if (!text || !*text) return;
     SDL_Surface *surf = TTF_RenderUTF8_Blended(font, text, color);
@@ -154,52 +170,106 @@ static void draw_text(SDL_Renderer *ren, TTF_Font *font, const char *text, int x
 }
 
 int main(int argc, char *argv[]) {
-    romfsInit();
+    // Open the debug log FIRST, before anything else, so we capture every step.
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/switchmio", 0777);
+    g_log = fopen("sdmc:/switch/switchmio/log.txt", "w");
+    logmsg("=== switchmio starting ===");
+
+    Result rc_romfs = romfsInit();
+    logmsg("romfsInit: %s (0x%x)", R_FAILED(rc_romfs) ? "FAILED" : "ok", rc_romfs);
 
     PadState pad;
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&pad);
 
     Result rc = socketInitializeDefault();
+    logmsg("socketInitializeDefault: %s (0x%x)", R_FAILED(rc) ? "FAILED" : "ok", rc);
     if (R_FAILED(rc)) {
-        romfsExit();
+        logmsg("Aborting: no network.");
+        if (!R_FAILED(rc_romfs)) romfsExit();
+        if (g_log) fclose(g_log);
         return 1;
     }
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) {
+        logmsg("SDL_Init FAILED: %s", SDL_GetError());
         curl_global_cleanup();
         socketExit();
         romfsExit();
+        if (g_log) fclose(g_log);
         return 1;
     }
+    logmsg("SDL_Init ok");
+
     if (TTF_Init() != 0) {
+        logmsg("TTF_Init FAILED: %s", TTF_GetError());
         SDL_Quit();
         curl_global_cleanup();
         socketExit();
         romfsExit();
+        if (g_log) fclose(g_log);
+        return 1;
+    }
+    logmsg("TTF_Init ok");
+
+    SDL_Window *win = SDL_CreateWindow("switchmio", 0, 0, SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
+    if (!win) logmsg("SDL_CreateWindow FAILED: %s", SDL_GetError());
+    else logmsg("SDL_CreateWindow ok");
+
+    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!ren) logmsg("SDL_CreateRenderer FAILED: %s", SDL_GetError());
+    else logmsg("SDL_CreateRenderer ok");
+
+    // Try the normal romfs path first; if that fails, fall back to a
+    // plain sdmc path in case romfs never mounted correctly.
+    TTF_Font *font = TTF_OpenFont("romfs:/font.ttf", FONT_SIZE);
+    if (!font) {
+        logmsg("TTF_OpenFont(romfs:/font.ttf) FAILED: %s", TTF_GetError());
+        font = TTF_OpenFont("sdmc:/switch/switchmio/font.ttf", FONT_SIZE);
+        if (!font) {
+            logmsg("TTF_OpenFont(sdmc fallback) FAILED: %s", TTF_GetError());
+        } else {
+            logmsg("Loaded font from sdmc fallback path instead of romfs.");
+        }
+    } else {
+        logmsg("TTF_OpenFont(romfs:/font.ttf) ok");
+    }
+
+    SDL_Color white     = {255, 255, 255, 255};
+    SDL_Color gray      = {160, 160, 160, 255};
+    SDL_Color highlight = {40, 90, 200, 255};
+
+    if (!win || !ren) {
+        logmsg("Aborting: window/renderer not available.");
+        if (font) TTF_CloseFont(font);
+        TTF_Quit();
+        if (ren) SDL_DestroyRenderer(ren);
+        if (win) SDL_DestroyWindow(win);
+        SDL_Quit();
+        curl_global_cleanup();
+        socketExit();
+        romfsExit();
+        if (g_log) fclose(g_log);
         return 1;
     }
 
-    SDL_Window *win = SDL_CreateWindow("switchmio", 0, 0, SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
-    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    TTF_Font *font = TTF_OpenFont("romfs:/font.ttf", FONT_SIZE);
-
-    SDL_Color white   = {255, 255, 255, 255};
-    SDL_Color gray    = {160, 160, 160, 255};
-    SDL_Color black   = {20, 20, 20, 255};
-    SDL_Color highlight = {40, 90, 200, 255};
-
-    // --- Loading screen while fetching ---
+    SDL_SetRenderDrawColor(ren, 15, 15, 20, 255);
+    SDL_RenderClear(ren);
     if (font) {
-        SDL_SetRenderDrawColor(ren, 15, 15, 20, 255);
-        SDL_RenderClear(ren);
         draw_text(ren, font, "switchmio - loading movies + series from Cinemeta...", 40, 40, white);
-        SDL_RenderPresent(ren);
+    } else {
+        SDL_SetRenderDrawColor(ren, 220, 120, 20, 255);
+        SDL_Rect bar = {40, 40, 600, 40};
+        SDL_RenderFillRect(ren, &bar);
     }
+    SDL_RenderPresent(ren);
+    logmsg("Loading screen presented (font=%s)", font ? "yes" : "no");
 
     fetch_full_catalog(MOVIE_URL_FMT, "movie");
     fetch_full_catalog(SERIES_URL_FMT, "series");
+    logmsg("Catalog fetch done, total items=%d", g_item_count);
 
     curl_global_cleanup();
     socketExit();
@@ -208,6 +278,7 @@ int main(int argc, char *argv[]) {
     int scroll_offset = 0;
     int visible_rows = (SCREEN_H - 100) / ROW_HEIGHT;
     int running = 1;
+    int frame = 0;
 
     while (running && appletMainLoop()) {
         padUpdate(&pad);
@@ -249,14 +320,25 @@ int main(int argc, char *argv[]) {
                     }
                     char line[300];
                     snprintf(line, sizeof(line), "[%s] %s", g_items[i].type, g_items[i].name);
-                    draw_text(ren, font, line, 30, y + 4, i == cursor ? white : white);
+                    draw_text(ren, font, line, 30, y + 4, white);
                     y += ROW_HEIGHT;
                 }
             }
+        } else {
+            SDL_SetRenderDrawColor(ren, 220, 40, 40, 255);
+            SDL_Rect bar = {30, 30, 400, 40};
+            SDL_RenderFillRect(ren, &bar);
         }
 
         SDL_RenderPresent(ren);
+
+        frame++;
+        if (frame == 1 || frame == 60 || frame == 300) {
+            logmsg("frame %d presented", frame);
+        }
     }
+
+    logmsg("Exiting main loop, total frames=%d", frame);
 
     if (font) TTF_CloseFont(font);
     TTF_Quit();
@@ -264,5 +346,6 @@ int main(int argc, char *argv[]) {
     SDL_DestroyWindow(win);
     SDL_Quit();
     romfsExit();
+    if (g_log) fclose(g_log);
     return 0;
 }

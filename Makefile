@@ -16,6 +16,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 # SOURCES is a list of directories containing source code
 # DATA is a list of directories containing data files
 # INCLUDES is a list of directories containing header files
+# ROMFS is a directory whose contents get bundled into the .nro (e.g. font.ttf)
 #
 # APP_TITLE, APP_AUTHOR, APP_VERSION define metadata shown on the Homebrew Menu
 # APP_ICON points to a 256x256 JPG used as the icon
@@ -25,6 +26,7 @@ BUILD       :=  build
 SOURCES     :=  source
 DATA        :=  data
 INCLUDES    :=  include
+ROMFS       :=  romfs
 
 APP_TITLE   :=  switchmio
 APP_AUTHOR  :=  You
@@ -34,8 +36,12 @@ APP_ICON    :=  icon/icon.jpg
 #---------------------------------------------------------------------------------
 ARCH    :=  -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
 
+# Cross pkg-config, used to pull correct cflags/libs for SDL2 + SDL2_ttf
+PKGCONF :=  $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
+PC_LIBS :=  sdl2 SDL2_ttf
+
 CFLAGS  :=  -g -Wall -O2 -ffunction-sections \
-            $(ARCH) $(DEFINES)
+            $(ARCH) $(DEFINES) `$(PKGCONF) --cflags $(PC_LIBS)`
 
 CFLAGS  +=  $(INCLUDE) -D__SWITCH__
 
@@ -44,7 +50,7 @@ CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++20
 ASFLAGS :=  -g $(ARCH)
 LDFLAGS  =  -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    :=  -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lnx
+LIBS    :=  `$(PKGCONF) --libs $(PC_LIBS)` -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lnx -lm
 
 #---------------------------------------------------------------------------------
 LIBDIRS :=  $(PORTLIBS) $(LIBNX)
@@ -83,6 +89,9 @@ export INCLUDE      :=  $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 export LIBPATHS     :=  $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 export NROFLAGS     :=  --icon=$(CURDIR)/$(APP_ICON) --nacp=$(CURDIR)/$(TARGET).nacp
+ifneq ($(ROMFS),)
+export NROFLAGS     +=  --romfsdir=$(CURDIR)/$(ROMFS)
+endif
 
 .PHONY: $(BUILD) clean all
 

@@ -32,7 +32,7 @@ APP_VERSION :=  1.0
 APP_ICON    :=  icon/icon.jpg
 
 #---------------------------------------------------------------------------------
-ARCH    :=  -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+ARCH    :=  -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
 
 CFLAGS  :=  -g -Wall -O2 -ffunction-sections \
             $(ARCH) $(DEFINES)
@@ -48,6 +48,11 @@ LIBS    :=  -lnx
 
 #---------------------------------------------------------------------------------
 LIBDIRS :=  $(PORTLIBS) $(LIBNX)
+
+#---------------------------------------------------------------------------------
+# Use the cross-compiler as the linker driver, not the plain system 'ld'
+#---------------------------------------------------------------------------------
+export LD := $(CC)
 
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))

@@ -40,6 +40,9 @@ ARCH    :=  -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC -ftls-mo
 PKGCONF :=  $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
 PC_LIBS :=  sdl2 SDL2_ttf SDL2_image
 
+PC_LIBS :=  sdl2 SDL2_ttf SDL2_image SDL2_mixer
+LIBS    :=  `$(PKGCONF) --libs $(PC_LIBS)` -lmodplug -lmpg123 -lvorbisidec -lopusfile -lopus -lFLAC -logg -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljpeg -lpng -lwebp -lz -lnx -lm
+
 CFLAGS  :=  -g -Wall -O2 -ffunction-sections \
             $(ARCH) $(DEFINES) `$(PKGCONF) --cflags $(PC_LIBS)`
 

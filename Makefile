@@ -36,9 +36,9 @@ APP_ICON    :=  icon/icon.jpg
 #---------------------------------------------------------------------------------
 ARCH    :=  -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
 
-# Cross pkg-config, used to pull correct cflags/libs for SDL2 + SDL2_ttf
+# Cross pkg-config, used to pull correct cflags/libs for SDL2 + SDL2_ttf + SDL2_image
 PKGCONF :=  $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
-PC_LIBS :=  sdl2 SDL2_ttf
+PC_LIBS :=  sdl2 SDL2_ttf SDL2_image
 
 CFLAGS  :=  -g -Wall -O2 -ffunction-sections \
             $(ARCH) $(DEFINES) `$(PKGCONF) --cflags $(PC_LIBS)`
@@ -50,7 +50,7 @@ CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++20
 ASFLAGS :=  -g $(ARCH)
 LDFLAGS  =  -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    :=  `$(PKGCONF) --libs $(PC_LIBS)` -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lnx -lm
+LIBS    :=  `$(PKGCONF) --libs $(PC_LIBS)` -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -ljpeg -lpng -lwebp -lz -lnx -lm
 
 #---------------------------------------------------------------------------------
 LIBDIRS :=  $(PORTLIBS) $(LIBNX)

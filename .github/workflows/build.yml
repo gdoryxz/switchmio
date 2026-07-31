@@ -13,8 +13,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install portlibs (curl, mbedtls, zlib)
-        run: dkp-pacman -S switch-curl switch-mbedtls switch-zlib --noconfirm --needed
+      - name: Install portlibs (curl, mbedtls, zlib, SDL2, ffmpeg)
+        run: dkp-pacman -S switch-curl switch-mbedtls switch-zlib switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-sdl2_mixer switch-freetype switch-ffmpeg switch-dav1d switch-libass switch-libfribidi switch-harfbuzz switch-bzip2 --noconfirm --needed
 
       - name: Build .nro
         run: make

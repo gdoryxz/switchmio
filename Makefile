@@ -10,16 +10,6 @@ endif
 TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
-#---------------------------------------------------------------------------------
-# TARGET is the name of the output .nro file
-# BUILD is the directory where object files & intermediate files will be placed
-# SOURCES is a list of directories containing source code
-# DATA is a list of directories containing data files
-# INCLUDES is a list of directories containing header files
-#
-# APP_TITLE, APP_AUTHOR, APP_VERSION define metadata shown on the Homebrew Menu
-# APP_ICON points to a 256x256 JPG used as the icon
-#---------------------------------------------------------------------------------
 TARGET      :=  switchmio
 BUILD       :=  build
 SOURCES     :=  source
@@ -31,7 +21,6 @@ APP_AUTHOR  :=  You
 APP_VERSION :=  1.0
 APP_ICON    :=  $(TOPDIR)/icon/icon.jpg
 
-#---------------------------------------------------------------------------------
 ARCH    :=  -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
 
 CFLAGS  :=  -g -Wall -O2 -ffunction-sections \
@@ -44,13 +33,11 @@ CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++20
 ASFLAGS :=  -g $(ARCH)
 LDFLAGS  =  -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    :=  -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lnx
+LIBS    :=  -lavformat -lavcodec -lavutil -lswscale -lswresample -lSDL2 -lSDL2_ttf -lSDL2_image -lSDL2_mixer -ljpeg -lpng -lwebp -lmodplug -lmpg123 -lvorbisidec -lopusfile -lopus -lFLAC -logg -ldav1d -lass -lharfbuzz -lfribidi -lfreetype -lbz2 -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lnx -lm
 
 #---------------------------------------------------------------------------------
 LIBDIRS :=  $(PORTLIBS) $(LIBNX)
 
-#---------------------------------------------------------------------------------
-# Use the cross-compiler as the linker driver, not the plain system 'ld'
 #---------------------------------------------------------------------------------
 export LD := $(CC)
 
@@ -82,10 +69,6 @@ export INCLUDE      :=  $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS     :=  $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
-#---------------------------------------------------------------------------------
-# THIS is what actually embeds the icon + app metadata into the .nro.
-# Without these two lines, elf2nro builds the file with no icon at all.
-#---------------------------------------------------------------------------------
 export NROFLAGS += --icon=$(APP_ICON)
 export NROFLAGS += --nacp=$(CURDIR)/$(TARGET).nacp
 
